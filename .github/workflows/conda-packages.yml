@@ -1,0 +1,110 @@
+# Reusable workflow: build conda packages, upload them to the conda channel,
+# trigger channel indexing, and (on release) publish the python package to PyPI.
+name: conda-packages (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      build_image:
+        description: Container image the jobs run in.
+        type: string
+        default: registry.simbricks.io/internal/conda-docker-image/conda-build-env:latest
+      channel_base_url:
+        description: Base URL of the conda channel host (channel name is appended).
+        type: string
+        default: https://conda.simbricks.io
+      index_pipeline_url:
+        description: GitLab pipeline-trigger API URL for reindexing the channel.
+        type: string
+        default: https://gitlab.simbricks.io/api/v4/projects/23/pipeline?ref=main
+    # Secrets are provided by the caller via `secrets: inherit`, so they are
+    # referenced directly below without an explicit `secrets:` declaration.
+
+env:
+  CHANNEL: ${{ github.ref_name == 'release' && 'stable' || 'latest' }}
+
+jobs:
+  build:
+    name: Build and upload conda packages
+    runs-on: [self-hosted, dedicated-1]
+
+    container:
+      image: ${{ inputs.build_image }}
+      options: --user root
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Build conda packages
+        run: make conda-packages OUTPUT_FOLDER=./conda-out
+
+      - name: Upload packages to registry
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          CHANNEL_BASE_URL: ${{ inputs.channel_base_url }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for pkg in conda-out/**/*.conda; do
+            dest="${pkg#conda-out/}"
+            echo "Uploading $pkg -> $dest"
+            curl --fail --silent --show-error --location \
+              --header "PRIVATE-TOKEN: $REGISTRY_TOKEN" \
+              --upload-file "$pkg" \
+              "$CHANNEL_BASE_URL/$CHANNEL/$dest"
+          done
+
+  trigger-indexing:
+    name: Trigger indexing of the conda channel to add the uploaded packages to the index
+    runs-on: [self-hosted, dedicated-1]
+    needs: build
+
+    container:
+      image: ${{ inputs.build_image }}
+      options: --user root
+
+    steps:
+      - name: Trigger indexing
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          INDEX_PIPELINE_URL: ${{ inputs.index_pipeline_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --request POST \
+            --header "PRIVATE-TOKEN: $REGISTRY_TOKEN" \
+            --header "Content-Type: application/json" \
+            --url "$INDEX_PIPELINE_URL" \
+            --data "{\"inputs\": {\"channel\": \"$CHANNEL\"}}"
+
+  pypi-publish:
+    name: Publish the python package to PyPI
+    if: github.event_name == 'push' && github.ref_name == 'release'
+    runs-on: [self-hosted, dedicated-1]
+    needs: build
+
+    container:
+      image: ${{ inputs.build_image }}
+      options: --user root
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install poetry
+        run: conda install -y poetry
+
+      - name: Publish to PyPI
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          poetry config pypi-token.pypi "$PYPI_API_TOKEN"
+          make pypi-publish
