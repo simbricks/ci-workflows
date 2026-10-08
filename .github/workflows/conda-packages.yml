@@ -21,7 +21,7 @@ on:
     # referenced directly below without an explicit `secrets:` declaration.
 
 env:
-  CHANNEL: ${{ github.ref_name == 'release' && 'stable' || 'latest' }}
+  CHANNEL: ${{ github.ref_name == 'release' && 'stable' || github.ref_name == 'kairolith' && 'kairolith' || 'latest' }}
 
 jobs:
   build:
