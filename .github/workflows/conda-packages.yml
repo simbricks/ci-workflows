@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
 
       - name: Build conda packages
-        run: make conda-packages OUTPUT_FOLDER=./conda-out
+        run: make conda-packages OUTPUT_FOLDER=./conda-out ${{ github.ref_name == 'kairolith' && 'SIMB_CONDA_CHANNEL="-c https://conda.simbricks.io/kairolith"' || '' }}
 
       - name: Upload packages to registry
         shell: bash
